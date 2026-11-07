@@ -1,6 +1,6 @@
 import { App } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'vitest';
 import { EnshroudedStack } from '../lib/enshrouded-stack.js';
 
 const template = () => {
@@ -32,9 +32,34 @@ describe('EnshroudedStack', () => {
     });
   });
 
-  it('runs one IMDSv2-only instance', () => {
+  it('runs the game server plus a doorbell, both IMDSv2-only', () => {
     const t = template();
-    t.resourceCountIs('AWS::EC2::Instance', 1);
-    expect(JSON.stringify(t.toJSON())).toContain('"HttpTokens":"required"');
+    t.resourceCountIs('AWS::EC2::Instance', 2);
+    t.resourceCountIs('AWS::EC2::LaunchTemplate', 2);
+    t.allResourcesProperties('AWS::EC2::LaunchTemplate', {
+      LaunchTemplateData: Match.objectLike({ MetadataOptions: Match.objectLike({ HttpTokens: 'required' }) }),
+    });
+  });
+
+  it('moves the Elastic IP when the server starts or stops', () => {
+    const t = template();
+    t.hasResourceProperties('AWS::Events::Rule', {
+      EventPattern: Match.objectLike({ detail: Match.objectLike({ state: ['running', 'stopped'] }) }),
+    });
+    t.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([Match.objectLike({ Action: 'ec2:AssociateAddress', Effect: 'Allow' })]),
+      }),
+    });
+  });
+
+  it('stops the server after sustained idle network traffic', () => {
+    template().hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'NetworkIn',
+      ComparisonOperator: 'LessThanThreshold',
+      EvaluationPeriods: 6,
+      TreatMissingData: 'notBreaching',
+      AlarmActions: [Match.objectLike({ 'Fn::Join': Match.anyValue() })],
+    });
   });
 });

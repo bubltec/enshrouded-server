@@ -12,5 +12,5 @@
     "noUncheckedIndexedAccess": true,
     "noEmit": true
   },
-  "include": ["bin", "lib", "test"]
+  "include": ["bin", "lib", "test", "admin"]
 }

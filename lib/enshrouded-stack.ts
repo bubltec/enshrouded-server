@@ -1,10 +1,18 @@
 import { CfnOutput, Duration, RemovalPolicy, Size, Stack, Tags, type StackProps } from 'aws-cdk-lib';
 import * as dlm from 'aws-cdk-lib/aws-dlm';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
+import { fileURLToPath } from 'node:url';
 import type { Construct } from 'constructs';
+import { buildDoorbellUserData } from './doorbell.js';
 import { buildUserData } from './user-data.js';
 
 export interface EnshroudedStackProps extends StackProps {
@@ -22,6 +30,10 @@ export interface EnshroudedStackProps extends StackProps {
 }
 
 export class EnshroudedStack extends Stack {
+  readonly instanceId: string;
+  readonly instanceArn: string;
+  readonly passwordSecret: secrets.ISecret;
+
   constructor(scope: Construct, id: string, props: EnshroudedStackProps = {}) {
     super(scope, id, props);
 
@@ -112,8 +124,81 @@ export class EnshroudedStack extends Stack {
       },
     });
 
-    // Stable address across stop/start.
-    const eip = new ec2.CfnEIP(this, 'Ip', { instanceId: instance.instanceId });
+    // Wake on connect. One Elastic IP follows whichever instance should answer: the game
+    // server while it runs, a tiny always-on "doorbell" while it is stopped. The doorbell
+    // starts the server when a packet arrives; the Lambda moves the IP on state changes.
+    // The IP starts on the server (deployed running); the Lambda owns it after that, so a
+    // later change to the association resource could move it back until the next event.
+    const eip = new ec2.CfnEIP(this, 'Ip', { domain: 'vpc' });
+    new ec2.CfnEIPAssociation(this, 'IpAssociation', { allocationId: eip.attrAllocationId, instanceId: instance.instanceId });
+
+    const instanceArn = this.formatArn({ service: 'ec2', resource: 'instance', resourceName: instance.instanceId });
+
+    const doorbellRole = new iam.Role(this, 'DoorbellRole', {
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')],
+    });
+    doorbellRole.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:StartInstances'], resources: [instanceArn] }));
+    const doorbell = new ec2.Instance(this, 'Doorbell', {
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      // No public IP of its own: it only needs one while it holds the Elastic IP.
+      associatePublicIpAddress: false,
+      instanceType: new ec2.InstanceType('t4g.nano'),
+      machineImage: ec2.MachineImage.latestAmazonLinux2023({ cpuType: ec2.AmazonLinuxCpuType.ARM_64 }),
+      securityGroup: sg,
+      role: doorbellRole,
+      requireImdsv2: true,
+    });
+    doorbell.addUserData(
+      ...buildDoorbellUserData({
+        region: this.region,
+        targetInstanceId: instance.instanceId,
+        maxWakesPerDay: 6,
+        cooldownSeconds: 600,
+      }),
+    );
+
+    const moveIp = new NodejsFunction(this, 'MoveIp', {
+      entry: fileURLToPath(new URL('./wake/eip-handler.ts', import.meta.url)),
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      timeout: Duration.seconds(30),
+      environment: {
+        ALLOCATION_ID: eip.attrAllocationId,
+        SERVER_INSTANCE_ID: instance.instanceId,
+        DOORBELL_INSTANCE_ID: doorbell.instanceId,
+      },
+      bundling: { externalModules: ['@aws-sdk/*'], minify: true, target: 'node24' },
+    });
+    moveIp.addToRolePolicy(new iam.PolicyStatement({ actions: ['ec2:AssociateAddress'], resources: ['*'] }));
+    new events.Rule(this, 'ServerStateChange', {
+      eventPattern: {
+        source: ['aws.ec2'],
+        detailType: ['EC2 Instance State-change Notification'],
+        detail: { 'instance-id': [instance.instanceId], state: ['running', 'stopped'] },
+      },
+      targets: [new eventTargets.LambdaFunction(moveIp)],
+    });
+
+    // Auto-stop: about 30 minutes of near-idle network traffic stops the server.
+    // Boot-time downloads count as traffic, so the clock effectively starts after startup.
+    // Missing data (instance stopped) is treated as fine. Tune the threshold after a real session.
+    const idle = new cloudwatch.Alarm(this, 'Idle', {
+      alarmDescription: 'Game server network traffic stayed near idle; stop it',
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/EC2',
+        metricName: 'NetworkIn',
+        dimensionsMap: { InstanceId: instance.instanceId },
+        statistic: 'Sum',
+        period: Duration.minutes(5),
+      }),
+      threshold: 5_000_000,
+      evaluationPeriods: 6,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    idle.addAlarmAction(new cwActions.Ec2Action(cwActions.Ec2InstanceAction.STOP));
 
     if (props.dns) {
       const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
@@ -128,6 +213,10 @@ export class EnshroudedStack extends Stack {
       });
       new CfnOutput(this, 'ServerHostname', { value: `${props.dns.recordName}.${props.dns.zoneName}` });
     }
+
+    this.instanceId = instance.instanceId;
+    this.instanceArn = instanceArn;
+    this.passwordSecret = password;
 
     new CfnOutput(this, 'ServerAddress', { value: `${eip.attrPublicIp}:15637` });
     new CfnOutput(this, 'InstanceId', { value: instance.instanceId });

@@ -9,7 +9,7 @@
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint -c .oxlintrc.json bin lib test",
+    "lint": "oxlint -c .oxlintrc.json bin lib test admin",
     "test": "vitest run",
     "synth": "cdk synth",
     "diff": "cdk diff",
@@ -21,8 +21,12 @@
     "constructs": "10.8.1"
   },
   "devDependencies": {
+    "@aws-sdk/client-ec2": "3.1163.0",
+    "@aws-sdk/client-secrets-manager": "3.1163.0",
+    "@types/aws-lambda": "8.10.164",
     "@types/node": "26.6.6",
     "aws-cdk": "2.1148.0",
+    "esbuild": "0.28.2",
     "oxlint": "1.92.0",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
