@@ -92,7 +92,7 @@ export class EnshroudedStack extends Stack {
       managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSDataLifecycleManagerServiceRole')],
     });
     new dlm.CfnLifecyclePolicy(this, 'DailySnapshots', {
-      description: 'Daily Enshrouded world snapshots, keep 7',
+      description: 'Daily Enshrouded world snapshots with 7 day retention',
       state: 'ENABLED',
       executionRoleArn: dlmRole.roleArn,
       policyDetails: {
