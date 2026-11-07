@@ -21,6 +21,17 @@ describe('EnshroudedStack', () => {
     t.resourceCountIs('AWS::DLM::LifecyclePolicy', 1);
   });
 
+  it('points an A record at the Elastic IP when dns is given', () => {
+    const stack = new EnshroudedStack(new App(), 'D', {
+      env: { account: '111111111111', region: 'us-east-1' },
+      dns: { hostedZoneId: 'Z123', zoneName: 'example.com', recordName: 'enshrouded' },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Route53::RecordSet', {
+      Name: 'enshrouded.example.com.',
+      Type: 'A',
+    });
+  });
+
   it('runs one IMDSv2-only instance', () => {
     const t = template();
     t.resourceCountIs('AWS::EC2::Instance', 1);

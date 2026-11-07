@@ -1,7 +1,8 @@
-import { CfnOutput, RemovalPolicy, Size, Stack, Tags, type StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Size, Stack, Tags, type StackProps } from 'aws-cdk-lib';
 import * as dlm from 'aws-cdk-lib/aws-dlm';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import type { Construct } from 'constructs';
 import { buildUserData } from './user-data.js';
@@ -16,6 +17,8 @@ export interface EnshroudedStackProps extends StackProps {
   /** Community Wine image. Pin a digest/tag once chosen. */
   image?: string;
   worldVolumeGiB?: number;
+  /** Existing public hosted zone; an A record `<recordName>.<zoneName>` points at the Elastic IP. */
+  dns?: { hostedZoneId: string; zoneName: string; recordName: string };
 }
 
 export class EnshroudedStack extends Stack {
@@ -111,6 +114,20 @@ export class EnshroudedStack extends Stack {
 
     // Stable address across stop/start.
     const eip = new ec2.CfnEIP(this, 'Ip', { instanceId: instance.instanceId });
+
+    if (props.dns) {
+      const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
+        hostedZoneId: props.dns.hostedZoneId,
+        zoneName: props.dns.zoneName,
+      });
+      new route53.ARecord(this, 'Dns', {
+        zone,
+        recordName: props.dns.recordName,
+        target: route53.RecordTarget.fromIpAddresses(eip.attrPublicIp),
+        ttl: Duration.minutes(1),
+      });
+      new CfnOutput(this, 'ServerHostname', { value: `${props.dns.recordName}.${props.dns.zoneName}` });
+    }
 
     new CfnOutput(this, 'ServerAddress', { value: `${eip.attrPublicIp}:15637` });
     new CfnOutput(this, 'InstanceId', { value: instance.instanceId });

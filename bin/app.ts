@@ -11,4 +11,5 @@ new EnshroudedStack(app, 'Enshrouded', {
   },
   allowedCidrs: app.node.tryGetContext('allowedCidrs')?.split(','),
   slotCount: 5,
+  dns: { hostedZoneId: 'Z08503632G57OD1I2BJ7V', zoneName: 'bubbletech.io', recordName: 'enshrouded' },
 });
